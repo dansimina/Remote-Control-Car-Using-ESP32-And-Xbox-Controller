@@ -191,7 +191,6 @@ void controlMotorsAndServo(void* parameter) {
           }
           
           // Calculate differential speeds based on steering
-          // IMPORTANT: Do this AFTER obstacle check
           int targetSpeedLeft, targetSpeedRight;
           
           if (targetSpeedBase == 0) {

@@ -1,0 +1,115 @@
+@startuml
+skinparam componentStyle rectangle
+
+skinparam component {
+    BackgroundColor<<power>> LightYellow
+    BackgroundColor<<controller>> LightBlue
+    BackgroundColor<<mcu>> LightGreen
+    BackgroundColor<<sensor>> LightCoral
+    BackgroundColor<<actuator>> LightCyan
+    BackgroundColor<<driver>> Wheat
+    BorderColor Black
+    FontSize 11
+}
+
+skinparam note {
+    BackgroundColor FloralWhite
+    BorderColor Black
+}
+
+title Schemă Bloc - Mașinuță RC Controlată Xbox (ESP32)
+
+' Alimentare
+component "6x Baterii AA\n1.2V 2100mAh\nTotal: 7.2V" as BAT <<power>>
+
+' Controller
+component "Xbox Controller\nBluetooth" as XBOX <<controller>>
+
+' Driver
+component "L298N H-Bridge\nENA: Pin 19\nIN1-2: Pin 18,5\nIN3-4: Pin 17,16\nENB: Pin 4" as L298N <<driver>>
+
+' ESP32
+package "ESP32 Microcontroller (5V)" <<mcu>> {
+    
+    package "Core 1" {
+        component "ReadController\nTask\nPrioritate: 2" as CORE1
+    }
+    
+    component "Semafor:\n• dataMutex\n(SemaphoreHandle_t)\n\nVariabile:\n• currentData\n• isConnected" as MUTEX
+    
+    package "Core 0" {
+        component "MotorControl\nTask\nPrioritate: 2" as MOTOR_TASK
+        component "Ultrasonic\nTask\nPrioritate: 1" as ULTRA_TASK
+    }
+}
+
+' Senzori
+component "HC-SR04 (5V)\nUltrasonic Sensor\nTRIG: Pin 12\nECHO: Pin 14\nRange: 3-100cm" as HCSR04 <<sensor>>
+
+' Actuatori
+component "Motor A\nStânga" as MOTORA <<actuator>>
+component "Motor B\nDreapta" as MOTORB <<actuator>>
+component "Servo Motor (5V)\nDirecție\nPin 13" as SERVO <<actuator>>
+
+' ========== CONEXIUNI ==========
+
+' Alimentare
+BAT -down-> L298N : 7.2V\nMotoare DC
+L298N --> "ESP32 Microcontroller (5V)" : 5V
+L298N -down-> HCSR04 : 5V
+L298N -down-> SERVO : 5V
+
+' Comunicare wireless
+XBOX .right.> CORE1 : BLE
+
+' Fluxul de date ESP32
+CORE1 -down-> MUTEX : WRITE
+MUTEX -down-> MOTOR_TASK : READ
+ULTRA_TASK -right-> MOTOR_TASK : distance
+
+' Senzor ultrasonic
+MOTOR_TASK -down-> HCSR04 : TRIG (10μs)
+HCSR04 -up-> ULTRA_TASK : ECHO\nInterrupt
+
+' Control actuatori
+MOTOR_TASK -down-> L298N : PWM + DIR\n(6 pini)
+MOTOR_TASK -down-> SERVO : PWM
+
+' Motoare
+L298N -down-> MOTORA : 7.2V
+L298N -down-> MOTORB : 7.2V
+
+' ========== NOTE ==========
+
+note right of MUTEX
+**Sincronizare**
+Evită race conditions
+între Core 1 și Core 0
+end note
+
+note right of MOTOR_TASK
+**Logică Control:**
+• Ramping accelerare/decelerare
+• Viteză diferențială la viraje
+  - Left: reduce Motor A
+  - Right: reduce Motor B
+• STOP la obstacole <30cm
+• Max speed: 230 PWM
+end note
+
+note right of ULTRA_TASK
+**State Machine:**
+START → TRIGGER →
+MEASUREMENT → WAITING
+end note
+
+note bottom of L298N
+**Caracteristici:**
+• Regulator: 7.2V → 5V
+• Control independent motoare
+• Alimentare duală:
+  - 7.2V pentru motoare DC
+  - 5V pentru restul componentelor
+end note
+
+@enduml
