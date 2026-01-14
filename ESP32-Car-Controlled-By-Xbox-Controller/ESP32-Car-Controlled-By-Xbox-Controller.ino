@@ -34,7 +34,10 @@ const int TRIG_PIN = 12;
 const int ECHO_PIN = 14;
 const double SOUND_SPEED = 0.034;
 
-enum STATE_MACHINE {START, TRIGGER, MEASUREMENT, WAITING};
+enum STATE_MACHINE { START,
+                     TRIGGER,
+                     MEASUREMENT,
+                     WAITING };
 enum STATE_MACHINE state;
 
 volatile unsigned long echoStartTime = 0;
@@ -42,10 +45,11 @@ volatile unsigned long echoEndTime = 0;
 volatile bool echoComplete = false;
 unsigned long lastMeasurementTime = 0;
 float distanceCm = 0.0;
-float distance = 0.0; // Mapped value 0-100 for distances 3-100cm
-const unsigned long MEASUREMENT_INTERVAL = 100; // milliseconds between measurements
-const float MIN_DISTANCE = 3.0;  // Minimum valid distance in cm
-const float MAX_DISTANCE = 100.0; // Maximum valid distance in cm
+float distance = 0.0;  // Mapped value 0-100 for distances 3-100cm
+SemaphoreHandle_t distanceMutex;
+const unsigned long MEASUREMENT_INTERVAL = 100;  // milliseconds between measurements
+const float MIN_DISTANCE = 3.0;                  // Minimum valid distance in cm
+const float MAX_DISTANCE = 100.0;                // Maximum valid distance in cm
 
 const int MAX_SPEED_WHEN_OBSTACLE = 50;
 const int WARNING_DISTANCE = 30;
@@ -94,8 +98,8 @@ void readControllerTask(void* parameter) {
 void ultrasonicTask(void* parameter) {
   while (true) {
     unsigned long currentTime = millis();
-    
-    switch(state) {
+
+    switch (state) {
       case START:
         // Initialize measurement
         digitalWrite(TRIG_PIN, LOW);
@@ -103,7 +107,7 @@ void ultrasonicTask(void* parameter) {
         lastMeasurementTime = currentTime;
         state = TRIGGER;
         break;
-        
+
       case TRIGGER:
         // Wait 2ms for sensor to settle, then send trigger pulse
         if (currentTime - lastMeasurementTime >= 2) {
@@ -114,31 +118,44 @@ void ultrasonicTask(void* parameter) {
           state = MEASUREMENT;
         }
         break;
-        
+
       case MEASUREMENT:
         // Check if echo measurement is complete
+
         if (echoComplete) {
           unsigned long duration = echoEndTime - echoStartTime;
           distanceCm = duration * SOUND_SPEED / 2;
-          
+          float localDistance = 100.0;
+
           if (distanceCm < MIN_DISTANCE) {
-            distance = MIN_DISTANCE;
+            localDistance = MIN_DISTANCE;
           } else if (distanceCm > MAX_DISTANCE) {
-            distance = MAX_DISTANCE;
+            localDistance = MAX_DISTANCE;
           } else {
-            distance = distanceCm;
+            localDistance = distanceCm;
           }
-          
+
           state = WAITING;
           lastMeasurementTime = currentTime;
+
+          if (xSemaphoreTake(distanceMutex, portMAX_DELAY)) {
+            distance = localDistance;
+            xSemaphoreGive(distanceMutex);
+          }
         } else if (currentTime - lastMeasurementTime > 40) {
           // Timeout after 40ms
-          distance = 100.0;
+          float localDistance = 100.0;
           state = WAITING;
           lastMeasurementTime = currentTime;
+
+          if (xSemaphoreTake(distanceMutex, portMAX_DELAY)) {
+            distance = localDistance;
+            xSemaphoreGive(distanceMutex);
+          }
         }
+
         break;
-        
+
       case WAITING:
         // Wait before next measurement
         if (currentTime - lastMeasurementTime >= MEASUREMENT_INTERVAL) {
@@ -146,129 +163,137 @@ void ultrasonicTask(void* parameter) {
         }
         break;
     }
-    
+
     vTaskDelay(5 / portTICK_PERIOD_MS);
   }
 }
 
 // Core 0: Control motors and servo (fast response)
 void controlMotorsAndServo(void* parameter) {
-  static int currentSpeedLeft = 0;  // Track left motor speed
-  static int currentSpeedRight = 0; // Track right motor speed
+  static int currentSpeedLeft = 0;   // Track left motor speed
+  static int currentSpeedRight = 0;  // Track right motor speed
   static bool wasMoving = false;
-  
+
   while (true) {
+    XboxControlsState localData;
+    bool localIsConnected = false;
     if (xSemaphoreTake(dataMutex, portMAX_DELAY)) {
-      if (isConnected) {
-        Serial.printf("lx: %.2f, ly: %.2f, rx: %.2f, ry: %.2f, lt: %.2f, rt: %.2f | Dist: %.1f cm\n",
-                      currentData.leftStickX, currentData.leftStickY,
-                      currentData.rightStickX, currentData.rightStickY,
-                      currentData.leftTrigger, currentData.rightTrigger,
-                      distance);
-
-        // Servo control
-        int angle = map(currentData.leftStickX * 100, -100, 100, MIN_ANGLE, MAX_ANGLE) + SERVO_CENTER;
-        myServo.write(angle);
-
-        // Calculate base speed
-        int speedForward = map(currentData.rightTrigger * 100, 0, 100, 0, MAX_SPEED);
-        int speedBackward = map(currentData.leftTrigger * 100, 0, 100, 0, MAX_SPEED);
-        int speed = speedForward - speedBackward;
-        int absSpeed = abs(speed);
-        bool isForward = (speed > 0);
-        
-        // Calculate steering factor (-1.0 to 1.0)
-        // Negative = left, Positive = right
-        float steerFactor = currentData.leftStickX;
-        
-        // Determine target speeds with obstacle detection
-        int targetSpeedBase = absSpeed;
-        
-        if (absSpeed > 10) {
-          // Check for obstacles when moving forward - STOP COMPLETELY
-          if(isForward && distance < WARNING_DISTANCE) {
-            targetSpeedBase = 0;
-          }
-          
-          // Calculate differential speeds based on steering
-          int targetSpeedLeft, targetSpeedRight;
-          
-          if (targetSpeedBase == 0) {
-            // Obstacle detected - STOP both motors completely
-            targetSpeedLeft = 0;
-            targetSpeedRight = 0;
-          }
-          else if (steerFactor < -0.1) {
-            // Turn LEFT - reduce LEFT motor speed (Motor A)
-            float reduction = abs(steerFactor); // 0.1 to 1.0
-            targetSpeedLeft = targetSpeedBase * (1.0 - reduction * 0.3);
-            targetSpeedRight = targetSpeedBase;
-          } 
-          else if (steerFactor > 0.1) {
-            // Turn RIGHT - reduce RIGHT motor speed (Motor B)
-            float reduction = abs(steerFactor); // 0.1 to 1.0
-            targetSpeedLeft = targetSpeedBase;
-            targetSpeedRight = targetSpeedBase * (1.0 - reduction * 0.3);
-          }
-          else {
-            // Go straight - both motors at same speed
-            targetSpeedLeft = targetSpeedBase;
-            targetSpeedRight = targetSpeedBase;
-          }
-          
-          // Soft start: gradually ramp up speed
-          const int RAMP_STEP = 10;
-          
-          // Left motor ramping
-          if (currentSpeedLeft < targetSpeedLeft) {
-            currentSpeedLeft = min(currentSpeedLeft + RAMP_STEP, targetSpeedLeft);
-          } else if (currentSpeedLeft > targetSpeedLeft) {
-            currentSpeedLeft = max(currentSpeedLeft - RAMP_STEP, targetSpeedLeft);
-          }
-          
-          // Right motor ramping
-          if (currentSpeedRight < targetSpeedRight) {
-            currentSpeedRight = min(currentSpeedRight + RAMP_STEP, targetSpeedRight);
-          } else if (currentSpeedRight > targetSpeedRight) {
-            currentSpeedRight = max(currentSpeedRight - RAMP_STEP, targetSpeedRight);
-          }
-          
-          // Apply speed to motors
-          motorAControl(currentSpeedLeft, isForward);  // LEFT motor
-          motorBControl(currentSpeedRight, isForward); // RIGHT motor
-          
-          wasMoving = true;
-        } else {
-          // Stop motors when trigger is released
-          if (wasMoving) {
-            // Gradual deceleration
-            if (currentSpeedLeft > 0 || currentSpeedRight > 0) {
-              currentSpeedLeft = max(0, currentSpeedLeft - 30);
-              currentSpeedRight = max(0, currentSpeedRight - 30);
-              motorAControl(currentSpeedLeft, isForward);
-              motorBControl(currentSpeedRight, isForward);
-            } else {
-              stopMotors();
-              wasMoving = false;
-            }
-          } else {
-            stopMotors();
-            currentSpeedLeft = 0;
-            currentSpeedRight = 0;
-          }
-        }
-
-      } else {
-        Serial.println("Controller not connected");
-        myServo.write(SERVO_CENTER);
-        stopMotors();
-        currentSpeedLeft = 0;
-        currentSpeedRight = 0;
-        wasMoving = false;
-      }
+      localData = currentData;
+      localIsConnected = isConnected;
       xSemaphoreGive(dataMutex);
     }
-    
+
+    float localDistance = 0.0;
+    if (xSemaphoreTake(distanceMutex, portMAX_DELAY)) {
+      localDistance = distance;
+      xSemaphoreGive(distanceMutex);
+    }
+
+    if (localIsConnected) {
+      Serial.printf("lx: %.2f, ly: %.2f, rx: %.2f, ry: %.2f, lt: %.2f, rt: %.2f | Dist: %.1f cm\n",
+                    localData.leftStickX, localData.leftStickY,
+                    localData.rightStickX, localData.rightStickY,
+                    localData.leftTrigger, localData.rightTrigger,
+                    localDistance);
+
+      // Servo control
+      int angle = map(localData.leftStickX * 100, -100, 100, MIN_ANGLE, MAX_ANGLE) + SERVO_CENTER;
+      myServo.write(angle);
+
+      // Calculate base speed
+      int speedForward = map(localData.rightTrigger * 100, 0, 100, 0, MAX_SPEED);
+      int speedBackward = map(localData.leftTrigger * 100, 0, 100, 0, MAX_SPEED);
+      int speed = speedForward - speedBackward;
+      int absSpeed = abs(speed);
+      bool isForward = (speed > 0);
+
+      // Calculate steering factor (-1.0 to 1.0)
+      // Negative = left, Positive = right
+      float steerFactor = localData.leftStickX;
+
+      // Determine target speeds with obstacle detection
+      int targetSpeedBase = absSpeed;
+
+      if (absSpeed > 10) {
+        // Check for obstacles when moving forward - STOP COMPLETELY
+        if (isForward && localDistance < WARNING_DISTANCE) {
+          targetSpeedBase = 0;
+        }
+
+        // Calculate differential speeds based on steering
+        int targetSpeedLeft, targetSpeedRight;
+
+        if (targetSpeedBase == 0) {
+          // Obstacle detected - STOP both motors completely
+          targetSpeedLeft = 0;
+          targetSpeedRight = 0;
+        } else if (steerFactor < -0.1) {
+          // Turn LEFT - reduce LEFT motor speed (Motor A)
+          float reduction = abs(steerFactor);  // 0.1 to 1.0
+          targetSpeedLeft = targetSpeedBase * (1.0 - reduction * 0.3);
+          targetSpeedRight = targetSpeedBase;
+        } else if (steerFactor > 0.1) {
+          // Turn RIGHT - reduce RIGHT motor speed (Motor B)
+          float reduction = abs(steerFactor);  // 0.1 to 1.0
+          targetSpeedLeft = targetSpeedBase;
+          targetSpeedRight = targetSpeedBase * (1.0 - reduction * 0.3);
+        } else {
+          // Go straight - both motors at same speed
+          targetSpeedLeft = targetSpeedBase;
+          targetSpeedRight = targetSpeedBase;
+        }
+
+        // Soft start: gradually ramp up speed
+        const int RAMP_STEP = 10;
+
+        // Left motor ramping
+        if (currentSpeedLeft < targetSpeedLeft) {
+          currentSpeedLeft = min(currentSpeedLeft + RAMP_STEP, targetSpeedLeft);
+        } else if (currentSpeedLeft > targetSpeedLeft) {
+          currentSpeedLeft = max(currentSpeedLeft - RAMP_STEP, targetSpeedLeft);
+        }
+
+        // Right motor ramping
+        if (currentSpeedRight < targetSpeedRight) {
+          currentSpeedRight = min(currentSpeedRight + RAMP_STEP, targetSpeedRight);
+        } else if (currentSpeedRight > targetSpeedRight) {
+          currentSpeedRight = max(currentSpeedRight - RAMP_STEP, targetSpeedRight);
+        }
+
+        // Apply speed to motors
+        motorAControl(currentSpeedLeft, isForward);   // LEFT motor
+        motorBControl(currentSpeedRight, isForward);  // RIGHT motor
+
+        wasMoving = true;
+      } else {
+        // Stop motors when trigger is released
+        if (wasMoving) {
+          // Gradual deceleration
+          if (currentSpeedLeft > 0 || currentSpeedRight > 0) {
+            currentSpeedLeft = max(0, currentSpeedLeft - 30);
+            currentSpeedRight = max(0, currentSpeedRight - 30);
+            motorAControl(currentSpeedLeft, isForward);
+            motorBControl(currentSpeedRight, isForward);
+          } else {
+            stopMotors();
+            wasMoving = false;
+          }
+        } else {
+          stopMotors();
+          currentSpeedLeft = 0;
+          currentSpeedRight = 0;
+        }
+      }
+
+    } else {
+      Serial.println("Controller not connected");
+      myServo.write(SERVO_CENTER);
+      stopMotors();
+      currentSpeedLeft = 0;
+      currentSpeedRight = 0;
+      wasMoving = false;
+    }
+
     vTaskDelay(10 / portTICK_PERIOD_MS);
   }
 }
@@ -318,12 +343,12 @@ void setup() {
   // Initialize ultrasonic sensor
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
-  
+
   // Attach interrupt to echo pin (triggers on both RISING and FALLING edges)
   attachInterrupt(digitalPinToInterrupt(ECHO_PIN), echoISR, CHANGE);
 
   state = START;
-  
+
   Serial.println("HC-SR04 Ultrasonic Sensor Ready (Interrupt-based)");
 
   // Initialize servo first
@@ -348,19 +373,21 @@ void setup() {
 
   controller.begin();
   dataMutex = xSemaphoreCreateMutex();
+  distanceMutex = xSemaphoreCreateMutex();
 
   // Core 1: Read controller
   BaseType_t task1 = xTaskCreatePinnedToCore(readControllerTask, "ReadController", 8192, NULL, 2, NULL, 1);
 
   // Core 0: Control motors and servo (highest priority for responsiveness)
   BaseType_t task2 = xTaskCreatePinnedToCore(controlMotorsAndServo, "MotorControl", 4096, NULL, 2, NULL, 0);
-  
+
   // Core 0: Ultrasonic sensor (lower priority)
   BaseType_t task3 = xTaskCreatePinnedToCore(ultrasonicTask, "Ultrasonic", 2048, NULL, 1, NULL, 0);
 
   if (task1 != pdPASS || task2 != pdPASS || task3 != pdPASS) {
     Serial.println("ERROR: Failed to create tasks!");
-    while(1); // Halt
+    while (1)
+      ;  // Halt
   }
 
   Serial.println("Started!");
