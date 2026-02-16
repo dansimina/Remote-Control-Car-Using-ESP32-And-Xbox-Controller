@@ -18,7 +18,7 @@ An autonomous car controlled wirelessly via an **Xbox One controller over Blueto
 
 > Click the thumbnail below to watch the demo:
 
-[![Demo Video](img1.jpg)](video.mp4)
+[![Demo Video](video.mp4)
 
 > *(Or open `video.mp4` directly from this repository.)*
 
@@ -163,7 +163,7 @@ START → TRIGGER (10µs pulse) → MEASUREMENT (wait for interrupt) → WAITING
 
 ### Prerequisites
 
-- [Arduino IDE]
+- Arduino IDE
 - ESP32 board support package installed
 - Libraries:
   - `BLE-Gamepad-Client by Tomasz Bekas`
