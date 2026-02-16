@@ -16,7 +16,7 @@ An autonomous car controlled wirelessly via an **Xbox One controller over Blueto
 
 ## 🎬 Demo Video
 
-[![Demo Video](video.gif)
+![Demo Video](video.gif)
 
 ---
 
