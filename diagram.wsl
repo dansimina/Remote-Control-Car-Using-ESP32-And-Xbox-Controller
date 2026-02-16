@@ -1,0 +1,115 @@
+@startuml
+skinparam componentStyle rectangle
+
+skinparam component {
+    BackgroundColor<<power>> LightYellow
+    BackgroundColor<<controller>> LightBlue
+    BackgroundColor<<mcu>> LightGreen
+    BackgroundColor<<sensor>> LightCoral
+    BackgroundColor<<actuator>> LightCyan
+    BackgroundColor<<driver>> Wheat
+    BorderColor Black
+    FontSize 11
+}
+
+skinparam note {
+    BackgroundColor FloralWhite
+    BorderColor Black
+}
+
+title Block Diagram - Xbox Controlled RC Car (ESP32)
+
+' Power Supply
+component "6x AA Batteries\n1.2V 2100mAh\nTotal: 7.2V" as BAT <<power>>
+
+' Controller
+component "Xbox Controller\nBluetooth" as XBOX <<controller>>
+
+' Driver
+component "L298N H-Bridge\nENA: Pin 19\nIN1-2: Pin 18,5\nIN3-4: Pin 17,16\nENB: Pin 4" as L298N <<driver>>
+
+' ESP32
+package "ESP32 Microcontroller (5V)" <<mcu>> {
+    
+    package "Core 1" {
+        component "ReadController\nTask\nPriority: 2" as CORE1
+    }
+    
+    component "Semaphore:\n• dataMutex\n(SemaphoreHandle_t)\n\nVariables:\n• currentData\n• isConnected" as MUTEX
+    
+    package "Core 0" {
+        component "MotorControl\nTask\nPriority: 2" as MOTOR_TASK
+        component "Ultrasonic\nTask\nPriority: 1" as ULTRA_TASK
+    }
+}
+
+' Sensors
+component "HC-SR04 (5V)\nUltrasonic Sensor\nTRIG: Pin 12\nECHO: Pin 14\nRange: 3-100cm" as HCSR04 <<sensor>>
+
+' Actuators
+component "Motor A\nLeft" as MOTORA <<actuator>>
+component "Motor B\nRight" as MOTORB <<actuator>>
+component "Servo Motor (5V)\nSteering\nPin 13" as SERVO <<actuator>>
+
+' ========== CONNECTIONS ==========
+
+' Power
+BAT -down-> L298N : 7.2V\nDC Motors
+L298N --> "ESP32 Microcontroller (5V)" : 5V
+L298N -down-> HCSR04 : 5V
+L298N -down-> SERVO : 5V
+
+' Wireless communication
+XBOX .right.> CORE1 : BLE
+
+' ESP32 data flow
+CORE1 -down-> MUTEX : WRITE
+MUTEX -down-> MOTOR_TASK : READ
+ULTRA_TASK -right-> MOTOR_TASK : distance
+
+' Ultrasonic sensor
+MOTOR_TASK -down-> HCSR04 : TRIG (10μs)
+HCSR04 -up-> ULTRA_TASK : ECHO\nInterrupt
+
+' Actuator control
+MOTOR_TASK -down-> L298N : PWM + DIR\n(6 pins)
+MOTOR_TASK -down-> SERVO : PWM
+
+' Motors
+L298N -down-> MOTORA : 7.2V
+L298N -down-> MOTORB : 7.2V
+
+' ========== NOTES ==========
+
+note right of MUTEX
+**Synchronization**
+Avoids race conditions
+between Core 1 and Core 0
+end note
+
+note right of MOTOR_TASK
+**Control Logic:**
+• Acceleration/deceleration ramping
+• Differential speed when turning
+  - Left: reduce Motor A
+  - Right: reduce Motor B
+• STOP when obstacles <30cm
+• Max speed: 230 PWM
+end note
+
+note right of ULTRA_TASK
+**State Machine:**
+START → TRIGGER →
+MEASUREMENT → WAITING
+end note
+
+note bottom of L298N
+**Features:**
+• Regulator: 7.2V → 5V
+• Independent motor control
+• Dual power supply:
+  - 7.2V for DC motors
+  - 5V for the rest of the components
+end note
+
+@enduml
